@@ -206,8 +206,7 @@
 
   <div class="toolbar">
     <button id="unlock" type="button">Boss-Modus öffnen</button>
-    <button id="save" type="button" class="primary" hidden>Für alle speichern</button>
-    <button id="tokenBtn" type="button" hidden>GitHub-Token</button>
+    <button id="save" type="button" class="primary" hidden>Jetzt speichern</button>
     <button id="lock" type="button" hidden>Sperren</button>
     <span class="status" id="status" role="status"></span>
   </div>
@@ -216,7 +215,7 @@
 
 
   <p class="hint" id="hint" hidden>
-    „Für alle speichern“ schreibt die Daten in die Datei data.json in deinem GitHub-Repository. Besucher sehen die Änderung nach dem nächsten Laden der Seite, spätestens nach zwei Minuten.
+    Alle Änderungen werden automatisch für alle gespeichert. Besucher sehen sie nach dem nächsten Laden der Seite, spätestens nach 30 Sekunden.
   </p>
 </main>
 
@@ -241,41 +240,26 @@
   </div>
 </dialog>
 
-<dialog id="tokenDialog">
-  <h2>GitHub-Token</h2>
-  <p class="note">Damit der Boss für alle speichern kann, braucht diese Seite einen Token. Erstelle auf GitHub unter Settings, Developer settings, Personal access tokens, Fine-grained tokens einen Token nur für dieses Repository mit der Berechtigung „Contents: Read and write“. Der Token bleibt nur in diesem Browser gespeichert.</p>
-  <label for="tokenInput">Token einfügen (leer lassen und speichern entfernt ihn)</label>
-  <input id="tokenInput" type="password" autocomplete="off">
-  <div class="row">
-    <button id="tokenOk" type="button" class="primary">Speichern</button>
-    <button id="tokenCancel" type="button">Abbrechen</button>
-  </div>
-</dialog>
+
 
 <script>
   // ====== Hier anpassen ======
-  const BOSS_PIN = "7453"; // Die PIN steht im Quelltext und ist kein echter Schutz.
+  const SUPABASE_URL = "";      // z. B. https://abcdxyz.supabase.co
+  const SUPABASE_ANON_KEY = ""; // der öffentliche "anon public"-Schlüssel (darf hier stehen)
   // Index 0 = Rang 1 (schwächster) ... Index 11 = Rang 12 (bester)
   const DEFAULT_RANKING = ["", "", "", "", "", "", "", "", "", "", "", ""];
   // Farm-Liste: { name: "Max", waffen: 0, colt: 0, gus: 0, fifty: 0 }
   const DEFAULT_FARM = [];
-  // Wo liegen die gemeinsamen Daten? Leer lassen = automatisch aus der Adresse (name.github.io/repo).
-  const GITHUB_OWNER = "";
-  const GITHUB_REPO = "";
-  const GITHUB_BRANCH = "main";
-  const DATA_PATH = "data.json";
   // ===========================
 
   const STORAGE_KEY = "abi-boss-rangliste-v1";
   const FARM_KEY = "abi-boss-farm-v1";
-  const TOKEN_KEY = "abi-boss-token-v1";
   const list = document.getElementById("list");
   const $ = function (id) { return document.getElementById(id); };
   const els = {
-    unlock: $("unlock"), save: $("save"), tokenBtn: $("tokenBtn"), lock: $("lock"),
+    unlock: $("unlock"), save: $("save"),  lock: $("lock"),
     status: $("status"), hint: $("hint"), dialog: $("pinDialog"),
-    pin: $("pin"), pinError: $("pinError"), pinOk: $("pinOk"), pinCancel: $("pinCancel"),
-    tokenDialog: $("tokenDialog"), tokenInput: $("tokenInput"), tokenOk: $("tokenOk"), tokenCancel: $("tokenCancel")
+    pin: $("pin"), pinError: $("pinError"), pinOk: $("pinOk"), pinCancel: $("pinCancel")
   };
 
   let editing = false;
@@ -331,7 +315,7 @@
         input.maxLength = 40;
         input.placeholder = "Name für Rang " + rank;
         input.setAttribute("aria-label", "Name für Rang " + rank);
-        input.addEventListener("input", function () { ranking[rank - 1] = input.value; });
+        input.addEventListener("input", function () { ranking[rank - 1] = input.value; scheduleSave(); });
         li.appendChild(input);
       } else {
         const name = document.createElement("div");
@@ -344,10 +328,10 @@
   }
 
   function setEditing(on) {
+    if (!on) { if (dirty) saveNow(); bossPin = ""; }
     editing = on;
     els.unlock.hidden = on;
     els.save.hidden = !on;
-    els.tokenBtn.hidden = !on;
     els.lock.hidden = !on;
     els.hint.hidden = !on;
     render();
@@ -366,39 +350,28 @@
     els.dialog.showModal();
     els.pin.focus();
   });
-  function tryPin() {
-    if (els.pin.value === BOSS_PIN) { els.dialog.close(); setEditing(true); }
-    else { els.pinError.textContent = "Falsche PIN. Versuche es noch einmal."; els.pin.select(); }
+  async function tryPin() {
+    const pin = els.pin.value;
+    if (!configured) { els.pinError.textContent = "Die Datenbank ist noch nicht eingerichtet (SUPABASE_URL fehlt im Skript)."; return; }
+    els.pinError.textContent = "Prüfe ...";
+    try {
+      if (await checkPin(pin)) { bossPin = pin; els.dialog.close(); setEditing(true); }
+      else { els.pinError.textContent = "Falsche PIN. Versuche es noch einmal."; els.pin.select(); }
+    } catch (e) { els.pinError.textContent = "Keine Verbindung zur Datenbank."; }
   }
   els.pinOk.addEventListener("click", tryPin);
   els.pin.addEventListener("keydown", function (e) { if (e.key === "Enter") tryPin(); });
   els.pinCancel.addEventListener("click", function () { els.dialog.close(); });
 
-  // ---- Gemeinsame Daten über GitHub ----
-  function repoInfo() {
-    let owner = GITHUB_OWNER, repo = GITHUB_REPO;
-    const m = location.hostname.match(/^(.+)\.github\.io$/);
-    if (m) {
-      if (!owner) owner = m[1];
-      if (!repo) {
-        const seg = location.pathname.split("/").filter(Boolean)[0];
-        repo = seg && !/\.html?$/i.test(seg) ? seg : owner + ".github.io";
-      }
-    }
-    return owner && repo ? { owner: owner, repo: repo } : null;
-  }
-  function apiUrl(info) {
-    return "https://api.github.com/repos/" + info.owner + "/" + info.repo + "/contents/" + DATA_PATH;
-  }
-  function fromB64(b64) {
-    return new TextDecoder().decode(Uint8Array.from(atob(b64.replace(/\s/g, "")), function (c) { return c.charCodeAt(0); }));
-  }
-  function toB64(str) {
-    let bin = "";
-    new TextEncoder().encode(str).forEach(function (b) { bin += String.fromCharCode(b); });
-    return btoa(bin);
-  }
+  // ---- Gemeinsame Daten über Supabase ----
+  const configured = !!(SUPABASE_URL && SUPABASE_ANON_KEY);
+  let bossPin = "";
+  let dirty = false;
+  let saveTimer = null;
 
+  function sbHeaders() {
+    return { apikey: SUPABASE_ANON_KEY, Authorization: "Bearer " + SUPABASE_ANON_KEY, "Content-Type": "application/json" };
+  }
   function cacheLocal() {
     try {
       localStorage.setItem(STORAGE_KEY, JSON.stringify(ranking));
@@ -406,7 +379,7 @@
     } catch (e) { /* egal */ }
   }
   function applyData(data) {
-    if (editing || !data) return;
+    if (editing || dirty || !data) return;
     if (Array.isArray(data.ranking) && data.ranking.length === 12) ranking = data.ranking.map(String);
     if (Array.isArray(data.farm)) farm = cleanFarm(data.farm);
     cacheLocal();
@@ -415,78 +388,47 @@
   }
 
   async function fetchRemote() {
-    const info = repoInfo();
-    let data = null;
-    if (info) {
-      try {
-        const r = await fetch(apiUrl(info) + "?ref=" + encodeURIComponent(GITHUB_BRANCH), {
-          headers: { Accept: "application/vnd.github+json" }, cache: "no-store"
-        });
-        if (r.ok) data = JSON.parse(fromB64((await r.json()).content));
-      } catch (e) { /* Fallback unten */ }
-    }
-    if (!data) {
-      try {
-        const r = await fetch(DATA_PATH + "?t=" + Date.now(), { cache: "no-store" });
-        if (r.ok) data = await r.json();
-      } catch (e) { /* offline oder Datei fehlt */ }
-    }
-    applyData(data);
+    if (!configured) return;
+    try {
+      const r = await fetch(SUPABASE_URL + "/rest/v1/boss_data?id=eq.1&select=data", { headers: sbHeaders(), cache: "no-store" });
+      if (!r.ok) return;
+      const rows = await r.json();
+      if (rows.length) applyData(rows[0].data);
+    } catch (e) { /* offline: zuletzt bekannter Stand bleibt */ }
   }
 
-  async function publish() {
-    const info = repoInfo();
-    if (!info) { say("Repository nicht erkannt. Trage GITHUB_OWNER und GITHUB_REPO im Skript ein."); return; }
-    const token = localStorage.getItem(TOKEN_KEY);
-    if (!token) { openToken(true); return; }
+  async function checkPin(pin) {
+    const r = await fetch(SUPABASE_URL + "/rest/v1/rpc/check_boss_pin", { method: "POST", headers: sbHeaders(), body: JSON.stringify({ pin: pin }) });
+    if (!r.ok) throw new Error("http " + r.status);
+    return (await r.json()) === true;
+  }
 
-    els.save.disabled = true;
-    say("Speichere ...");
-    const url = apiUrl(info);
-    const headers = { Authorization: "Bearer " + token, Accept: "application/vnd.github+json" };
-    const content = toB64(JSON.stringify({ ranking: ranking, farm: farm }, null, 2));
+  function scheduleSave() {
+    dirty = true;
+    say("Änderungen werden gespeichert ...");
+    clearTimeout(saveTimer);
+    saveTimer = setTimeout(saveNow, 1200);
+  }
+
+  async function saveNow() {
+    clearTimeout(saveTimer);
+    if (!configured) { say("Die Datenbank ist noch nicht eingerichtet."); return; }
+    const pin = bossPin;
+    if (!pin) return;
+    const payload = { ranking: ranking.slice(), farm: JSON.parse(JSON.stringify(farm)) };
+    dirty = false;
     try {
-      for (let attempt = 0; attempt < 2; attempt++) {
-        let sha;
-        const g = await fetch(url + "?ref=" + encodeURIComponent(GITHUB_BRANCH), { headers: headers, cache: "no-store" });
-        if (g.ok) sha = (await g.json()).sha;
-        else if (g.status === 401 || g.status === 403) { say("Token ungültig oder ohne Rechte. Prüfe ihn unter „GitHub-Token“."); return; }
-        const put = await fetch(url, {
-          method: "PUT", headers: headers,
-          body: JSON.stringify({ message: "Rangliste und Farm aktualisiert", content: content, branch: GITHUB_BRANCH, sha: sha })
-        });
-        if (put.ok) { cacheLocal(); say("Für alle gespeichert."); return; }
-        if (put.status === 409 || put.status === 422) continue;
-        if (put.status === 401 || put.status === 403) { say("Token ungültig oder ohne Schreibrecht (Contents: Read and write)."); return; }
-        say("Speichern fehlgeschlagen (Fehler " + put.status + ").");
-        return;
-      }
-      say("Konflikt beim Speichern. Bitte noch einmal klicken.");
+      const r = await fetch(SUPABASE_URL + "/rest/v1/rpc/save_boss_data", {
+        method: "POST", headers: sbHeaders(), body: JSON.stringify({ pin: pin, payload: payload })
+      });
+      if (r.ok) { cacheLocal(); say("Für alle gespeichert."); }
+      else { dirty = true; say(r.status === 400 ? "Die PIN wurde abgelehnt." : "Speichern fehlgeschlagen (Fehler " + r.status + ")."); }
     } catch (e) {
-      say("Keine Verbindung zu GitHub.");
-    } finally {
-      els.save.disabled = false;
+      dirty = true;
+      say("Keine Verbindung. Die Änderungen sind noch nicht gespeichert.");
     }
   }
-  els.save.addEventListener("click", publish);
-
-  let publishAfterToken = false;
-  function openToken(thenPublish) {
-    publishAfterToken = !!thenPublish;
-    els.tokenInput.value = "";
-    els.tokenDialog.showModal();
-    els.tokenInput.focus();
-  }
-  els.tokenBtn.addEventListener("click", function () { openToken(false); });
-  els.tokenCancel.addEventListener("click", function () { els.tokenDialog.close(); });
-  els.tokenOk.addEventListener("click", function () {
-    const v = els.tokenInput.value.trim();
-    try {
-      if (v) localStorage.setItem(TOKEN_KEY, v); else localStorage.removeItem(TOKEN_KEY);
-    } catch (e) { /* egal */ }
-    els.tokenDialog.close();
-    if (v && publishAfterToken) publish(); else say(v ? "Token gespeichert." : "Token entfernt.");
-  });
+  els.save.addEventListener("click", function () { dirty = true; saveNow(); });
 
   els.lock.addEventListener("click", function () { setEditing(false); });
 
@@ -586,7 +528,7 @@
         nameLabel.textContent = "Name";
         const nameIn = document.createElement("input");
         nameIn.type = "text"; nameIn.maxLength = 30; nameIn.value = p.name;
-        nameIn.addEventListener("input", function () { p.name = nameIn.value; renderChart(); });
+        nameIn.addEventListener("input", function () { p.name = nameIn.value; renderChart(); scheduleSave(); });
         nameLabel.appendChild(nameIn);
         row.appendChild(nameLabel);
 
@@ -595,7 +537,7 @@
           l.textContent = k.label;
           const inp = document.createElement("input");
           inp.type = "number"; inp.min = "0"; inp.step = "1"; inp.inputMode = "numeric"; inp.value = p[k.key];
-          inp.addEventListener("input", function () { p[k.key] = num(inp.value); renderChart(); });
+          inp.addEventListener("input", function () { p[k.key] = num(inp.value); renderChart(); scheduleSave(); });
           l.appendChild(inp);
           row.appendChild(l);
         });
@@ -603,7 +545,7 @@
         const del = document.createElement("button");
         del.type = "button"; del.textContent = "Löschen";
         del.setAttribute("aria-label", "Eintrag " + (p.name || (idx + 1)) + " löschen");
-        del.addEventListener("click", function () { farm.splice(idx, 1); renderFarmEditor(); });
+        del.addEventListener("click", function () { farm.splice(idx, 1); renderFarmEditor(); scheduleSave(); });
         row.appendChild(del);
         box.appendChild(row);
       });
@@ -612,6 +554,7 @@
       add.addEventListener("click", function () {
         farm.push({ name: "", waffen: 0, colt: 0, gus: 0, fifty: 0 });
         renderFarmEditor();
+        scheduleSave();
         const ins = box.querySelectorAll(".ed-name input");
         if (ins.length) ins[ins.length - 1].focus();
       });
@@ -635,7 +578,7 @@
   render();
   renderFarmEditor();
   fetchRemote();
-  setInterval(function () { if (!editing && !document.hidden) fetchRemote(); }, 120000);
+  setInterval(function () { if (!editing && !document.hidden) fetchRemote(); }, 30000);
   document.addEventListener("visibilitychange", function () { if (!document.hidden && !editing) fetchRemote(); });
 </script>
 </body>
